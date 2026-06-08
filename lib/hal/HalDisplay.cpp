@@ -11,19 +11,7 @@ HalDisplay::HalDisplay() : einkDisplay(EPD_SCLK, EPD_MOSI, EPD_CS, EPD_DC, EPD_R
 HalDisplay::~HalDisplay() {}
 
 void HalDisplay::begin() {
-  // Set X3-specific panel mode before initializing.
-  if (gpio.deviceIsX3()) {
-    einkDisplay.setDisplayX3();
-  }
-
   einkDisplay.begin();
-
-  // Request resync after specific wakeup events to ensure clean display state
-  const auto wakeupReason = gpio.getWakeupReason();
-  if (wakeupReason == HalGPIO::WakeupReason::PowerButton || wakeupReason == HalGPIO::WakeupReason::AfterFlash ||
-      wakeupReason == HalGPIO::WakeupReason::Other) {
-    einkDisplay.requestResync();
-  }
 }
 
 void HalDisplay::clearScreen(uint8_t color) const { einkDisplay.clearScreen(color); }
@@ -35,17 +23,30 @@ void HalDisplay::drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uin
 
 void HalDisplay::drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                                       bool fromProgmem) const {
-  einkDisplay.drawImageTransparent(imageData, x, y, w, h, fromProgmem);
+  uint8_t* fb = einkDisplay.getFrameBuffer();
+  const uint16_t srcBytesPerRow = (w + 7) / 8;
+  for (uint16_t row = 0; row < h; row++) {
+    if ((y + row) >= DISPLAY_HEIGHT) break;
+    for (uint16_t col = 0; col < w; col++) {
+      if ((x + col) >= DISPLAY_WIDTH) break;
+      uint8_t srcByte = fromProgmem ? pgm_read_byte(&imageData[row * srcBytesPerRow + col / 8])
+                                    : imageData[row * srcBytesPerRow + col / 8];
+      if (!(srcByte & (0x80 >> (col % 8)))) {
+        // Black pixel: write to framebuffer, leave white (transparent) pixels unchanged
+        uint32_t fbIdx = static_cast<uint32_t>(y + row) * DISPLAY_WIDTH_BYTES + (x + col) / 8;
+        fb[fbIdx] &= ~(0x80 >> ((x + col) % 8));
+      }
+    }
+  }
 }
 
-EInkDisplay::RefreshMode convertRefreshMode(HalDisplay::RefreshMode mode) {
+static EInkDisplay::RefreshMode convertRefreshMode(HalDisplay::RefreshMode mode) {
   switch (mode) {
     case HalDisplay::FULL_REFRESH:
       return EInkDisplay::FULL_REFRESH;
     case HalDisplay::HALF_REFRESH:
       return EInkDisplay::HALF_REFRESH;
     case HalDisplay::DARK_REDRIVE:
-      return EInkDisplay::DARK_REDRIVE;
     case HalDisplay::FAST_REFRESH:
     default:
       return EInkDisplay::FAST_REFRESH;
@@ -53,11 +54,13 @@ EInkDisplay::RefreshMode convertRefreshMode(HalDisplay::RefreshMode mode) {
 }
 
 void HalDisplay::displayBuffer(HalDisplay::RefreshMode mode, bool turnOffScreen) {
-  if (gpio.deviceIsX3() && mode == RefreshMode::HALF_REFRESH) {
-    einkDisplay.requestResync(1);
+  if (mode == RefreshMode::DARK_REDRIVE) {
+    einkDisplay.forceRedRamInverted();
   }
-
-  einkDisplay.displayBuffer(convertRefreshMode(mode), turnOffScreen);
+  einkDisplay.displayBuffer(convertRefreshMode(mode));
+  if (turnOffScreen) {
+    einkDisplay.deepSleep();
+  }
 }
 
 void HalDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen) {
@@ -69,10 +72,9 @@ void HalDisplay::displayWindowDarkRedrive(uint16_t x, uint16_t y, uint16_t w, ui
 }
 
 void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen) {
-  if (gpio.deviceIsX3() && mode == RefreshMode::HALF_REFRESH) {
-    einkDisplay.requestResync(1);
+  if (mode == RefreshMode::DARK_REDRIVE) {
+    einkDisplay.forceRedRamInverted();
   }
-
   einkDisplay.refreshDisplay(convertRefreshMode(mode), turnOffScreen);
 }
 
@@ -92,10 +94,10 @@ void HalDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) { einkDisplay.
 
 void HalDisplay::displayGrayBuffer(bool turnOffScreen) { einkDisplay.displayGrayBuffer(turnOffScreen); }
 
-uint16_t HalDisplay::getDisplayWidth() const { return einkDisplay.getDisplayWidth(); }
+uint16_t HalDisplay::getDisplayWidth() const { return DISPLAY_WIDTH; }
 
-uint16_t HalDisplay::getDisplayHeight() const { return einkDisplay.getDisplayHeight(); }
+uint16_t HalDisplay::getDisplayHeight() const { return DISPLAY_HEIGHT; }
 
-uint16_t HalDisplay::getDisplayWidthBytes() const { return einkDisplay.getDisplayWidthBytes(); }
+uint16_t HalDisplay::getDisplayWidthBytes() const { return DISPLAY_WIDTH_BYTES; }
 
-uint32_t HalDisplay::getBufferSize() const { return einkDisplay.getBufferSize(); }
+uint32_t HalDisplay::getBufferSize() const { return BUFFER_SIZE; }
